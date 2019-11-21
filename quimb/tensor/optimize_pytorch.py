@@ -249,10 +249,16 @@ class TNOptimizer:
         self._maybe_start_timer(max_time)
         try:
             for _ in range(max_steps):
+                if self.progbar is False:
+                    t0 = time.time()
                 self.optimizer.step(self.closure)
                 pbar.set_description(f"{self.loss}")
                 pbar.update()
                 self._n += 1
+
+                if self.progbar is False:
+                    t1 = time.time()
+                    print('loss = {}, iter time = {}'.format(self.loss, t1-t0))
 
                 # check if there is a target loss we have reached
                 if (self.loss_target is not None):
