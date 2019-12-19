@@ -189,7 +189,11 @@ class TNOptimizer:
             tn, self.constant_tags
         )
 
-        self.optimizer = getattr(torch.optim, optimizer)(self.variables,
+        if optimizer == "LBFGS":
+            self.optimizer = getattr(torch.optim, optimizer)(self.variables,
+                                          lr=100.0, line_search_fn='strong_wolfe')
+        else:
+            self.optimizer = getattr(torch.optim, optimizer)(self.variables,
                                                          lr=learning_rate)
 
     def closure(self):
