@@ -73,6 +73,22 @@ def parse_network_to_torch(tn, constant_tags):
     return tn_torch, variables, iscomplex
 
 
+def abs_max_grad(tn):
+    torch, device = _get_torch_and_device()
+    views = []
+    for t in tn:
+        p = t.data
+        if p.grad is None:
+            view = p.new(p.numel()).zero_()
+        elif p.grad.is_sparse:
+            view = p.grad.to_dense().view(-1)
+        else:
+            view = p.grad.view(-1)
+        views.append(view)
+    flat_grad = torch.cat(views, 0)
+    return flat_grad.abs().max()
+
+
 class TNOptimizer:
     """Optimize a tensor network's arrays using pytorch.
 
@@ -148,6 +164,8 @@ class TNOptimizer:
         optimizer='Adam',
         learning_rate=0.01,
         loss_target=None,
+        tol_change=1e-9,
+        tol_grad=1e-6,
         device=None,
         progbar=True
     ):
@@ -157,6 +175,8 @@ class TNOptimizer:
         self.optimizer = optimizer
         self._learning_rate = learning_rate
         self.loss_target = loss_target
+        self.tol_change = tol_change
+        self.tol_grad = tol_grad
         self.progbar = progbar
         self.constant_tags = (set() if constant_tags is None
                               else set(constant_tags))
@@ -191,7 +211,9 @@ class TNOptimizer:
 
         if optimizer == "LBFGS":
             self.optimizer = getattr(torch.optim, optimizer)(self.variables,
-                                          lr=100.0, line_search_fn='strong_wolfe')
+                             lr=100.0, line_search_fn='strong_wolfe',
+                             tolerance_grad=tol_grad, tolerance_change=tol_change,
+                             max_iter=10, max_eval=60)
         else:
             self.optimizer = getattr(torch.optim, optimizer)(self.variables,
                                                          lr=learning_rate)
@@ -252,7 +274,7 @@ class TNOptimizer:
         pbar = tqdm.tqdm(total=max_steps, disable=not self.progbar)
         self._maybe_start_timer(max_time)
         try:
-            for _ in range(max_steps):
+            for it in range(max_steps):
                 if self.progbar is False:
                     t0 = time.time()
                 self.optimizer.step(self.closure)
@@ -264,14 +286,20 @@ class TNOptimizer:
                     t1 = time.time()
                     print('loss = {}, iter time = {}'.format(self.loss, t1-t0))
 
-                # check if there is a target loss we have reached
+                # stopping conditions
                 if (self.loss_target is not None):
                     if self.loss < self.loss_target:
                         break
                 if self._time_should_stop(max_time):
                     break
+                if it > 0:
+                    if abs(self.loss - prev_loss) <= self.tol_change:
+                        break
+                if abs_max_grad(self.tn_opt) <= self.tol_grad:
+                    break
 
                 pbar.set_description(f"{self.loss}")
+                prev_loss = self.loss
 
         except Exception as excpt:
             if not isinstance(excpt, KeyboardInterrupt):
