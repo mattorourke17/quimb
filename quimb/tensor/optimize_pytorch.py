@@ -194,14 +194,15 @@ class TNOptimizer:
 
     def closure(self):
         self.optimizer.zero_grad()
-        tn = self.norm_fn(self.tn_opt)
-        if self.norm_fn_scalar is not None:
-            torch, _ = _TORCH_DEVICE
-            with torch.no_grad():
-                fac = self.norm_fn_scalar(tn)
-            self.loss = self.loss_fn(tn.multiply_each(fac, inplace=False))
-        else:
-            self.loss = self.loss_fn(tn)
+        tn = self.norm_fn(self.tn_opt) # MJO: can't move this out of closure
+                                       # and down into optimizer() with 
+                                       # norm_fn_scalar because we need
+                                       # norm_fn() to be a STRICTLY in-place
+                                       # modification of tn_opt for that 
+                                       # to work. I'm not sure how we can
+                                       # guarantee that for a norm_fn()
+                                       # with completely general functionality
+        self.loss = self.loss_fn(tn)
         self.loss.backward()
         return self.loss
 
@@ -233,13 +234,7 @@ class TNOptimizer:
             return (time.time() - self._time_start) > max_time
 
     def _get_tn_opt_numpy(self):
-        tn_opt_numpy = self.norm_fn(self.tn_opt)
-        if self.norm_fn_scalar is not None:
-            torch, _ = _TORCH_DEVICE
-            with torch.no_grad():
-                fac = self.norm_fn_scalar(tn_opt_numpy)
-            tn_opt_numpy.multiply_each_(fac)
-        tn_opt_numpy.apply_to_arrays(lambda x: x.cpu().detach().numpy())
+        tn_opt_numpy = self.tn_opt.apply_to_arrays(lambda x: x.cpu().detach().numpy())
         return tn_opt_numpy
 
     def optimize(self, max_steps, max_time=None):
@@ -251,7 +246,17 @@ class TNOptimizer:
             for _ in range(max_steps):
                 if self.progbar is False:
                     t0 = time.time()
+
+                # keep the tn actually normalized during the optimization
+                # by doing STRICTLY IN-PLACE modification of tn_opt
+                if self.norm_fn_scalar is not None:
+                    torch, _ = _TORCH_DEVICE
+                    with torch.no_grad():
+                        fac = self.norm_fn_scalar(self.tn_opt)
+                        self.tn_opt.multiply_each(fac, inplace=True)
+
                 self.optimizer.step(self.closure)
+
                 pbar.set_description(f"{self.loss}")
                 pbar.update()
                 self._n += 1
