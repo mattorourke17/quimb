@@ -85,26 +85,33 @@ class TNOptimizer:
         The target loss function to minimize. Should accept ``tn`` (backed by
         pytorch tensors) or the output of ``norm_fn``.
     norm_fn : callable, optional
-        A function to normalize ``tn`` before being passed to ``loss_fn`` and
-        also to call on the final, optimized tensor network. This offers very
+        A function to normalize ``tn`` before being passed to ``loss_fn``. 
+        This offers very
         general support, so it can be used
         to enforce any constraints such as normalization or unitarity. The
         penalty of using this level of generality is that all operations
         that occur within ``norm_fn`` will be added to the computation graph,
-        and thus differentiated during backpropagation.
+        and thus differentiated during backpropagation. Note that due to the
+        generality of this function, it does not actually keep the parameters
+        under optimization within the normalized manifold, but instead just
+        keeps the evaluation of loss_fn within the normalized manifold. This
+        can lead to numerical instability in large TNs where the norm may
+        explode after many iterations.
     norm_fn_scalar: callable, optional
         A function that accepts ``tn`` and computes the scalar ``x`` by which
         to multiply each tensor in ``tn`` in order to normalize it. If ``tn``
         is normalized by simple scalar multiplication of the tensors, it is
         recommended to use this function instead of ``norm_fn``. In this case,
-        the computation of ``x`` can be performed outside the scope of the
-        differentiable computation graph, while only the scalar multiplication
-        of each tensor by ``x`` is included in the differentiable graph. This
-        can lead to reductions in cpu time and memory usage when compared
-        to ``norm_fn``. If desired, both ``norm_fn`` and ``norm_fn_scalar`` can
+        the computation of ``x`` and the rescaling of the tensor values can be 
+        performed outside the scope of the
+        differentiable computation graph. This has two important advantages:
+        1) It can lead to reductions in cpu time and memory usage when compared
+        to ``norm_fn``. 2) It can actually modify the parameters under optimization
+        to keep them normalized throughout the procedure, increasing numerical
+        stability. If desired, both ``norm_fn`` and ``norm_fn_scalar`` can
         be used at the same time to enforce general constraints on ``tn`` and
         then normalize it with scalar multiplication. In this case, note that
-        ``norm_fn`` is applied first, and then ``norm_fn_scalar``.
+        ``norm_fn_scalar`` is applied first, and then ``norm_fn``.
     loss_constants : dict_like, optional
         Extra constant arguments to supply to ``loss_fn`` and be converted to
         tensorflow constant tensors. Can be individual arrays or tensor
