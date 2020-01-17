@@ -59,6 +59,18 @@ def _unitize_qr(x):
     return Q
 
 
+def _unitize_svd(x):
+    fat = x.shape[0] < x.shape[1]
+    if fat:
+        x = transpose(x)
+
+    Q = do('linalg.svd', x)[0]
+    if fat:
+        Q = transpose(Q)
+
+    return Q
+
+
 def _unitize_exp(x):
     r"""Perform isometrization using the using anti-symmetric matrix
     exponentiation.
@@ -106,6 +118,7 @@ def _unitize_modified_gram_schmidt(A):
 
 _UNITIZE_METHODS = {
     'qr': _unitize_qr,
+    'svd': _unitize_svd,
     'exp': _unitize_exp,
     'mgs': _unitize_modified_gram_schmidt,
 }
@@ -126,15 +139,178 @@ def unitize(x, method='qr'):
     return _UNITIZE_METHODS[method](x)
 
 
-def find_diag_axes(x, atol=1e-13):
+def find_diag_axes(x, atol=1e-12):
     """Try and find a pair of axes of ``x`` in which it is diagonal.
+
+    Parameters
+    ----------
+    x : array-like
+        The array to search.
+    atol : float, optional
+        Tolerance with which to compare to zero.
+
+    Returns
+    -------
+    tuple[int] or None
+        The two axes if found else None.
+
+    Examples
+    --------
+
+        >>> x = np.array([[[1, 0], [0, 2]],
+        ...               [[3, 0], [0, 4]]])
+        >>> find_diag_axes(x)
+        (1, 2)
+
+    Which means we can reduce ``x`` without loss of information to:
+
+        >>> np.einsum('abb->ab', x)
+        array([[1, 2],
+               [3, 4]])
+
     """
     shape = x.shape
-    indexers = do('indices', shape, like=x)
+    indxrs = do('indices', shape, like=x)
 
     for i, j in itertools.combinations(range(len(shape)), 2):
         if shape[i] != shape[j]:
             continue
-        if do('allclose', x[indexers[i] != indexers[j]], 0.0, atol=atol):
+        if do('allclose', x[indxrs[i] != indxrs[j]], 0.0, atol=atol):
             return (i, j)
     return None
+
+
+def find_antidiag_axes(x, atol=1e-12):
+    """Try and find a pair of axes of ``x`` in which it is anti-diagonal.
+
+    Parameters
+    ----------
+    x : array-like
+        The array to search.
+    atol : float, optional
+        Tolerance with which to compare to zero.
+
+    Returns
+    -------
+    tuple[int] or None
+        The two axes if found else None.
+
+    Examples
+    --------
+
+        >>> x = np.array([[[0, 1], [0, 2]],
+        ...               [[3, 0], [4, 0]]])
+        >>> find_antidiag_axes(x)
+        (0, 2)
+
+    Which means we can reduce ``x`` without loss of information to:
+
+        >>> np.einsum('aba->ab', x[::-1, :, :])
+        array([[3, 4],
+               [1, 2]])
+
+    as long as we flip the order of dimensions on other tensors corresponding
+    to the the same index.
+    """
+    shape = x.shape
+    indxrs = do('indices', shape, like=x)
+
+    for i, j in itertools.combinations(range(len(shape)), 2):
+        di, dj = shape[i], shape[j]
+        if di != dj:
+            continue
+        if do('allclose', x[indxrs[i] != dj - 1 - indxrs[j]], 0.0, atol=atol):
+            return (i, j)
+    return None
+
+
+def find_columns(x, atol=1e-12):
+    """Try and find columns of axes which are zero apart from a single index.
+
+    Parameters
+    ----------
+    x : array-like
+        The array to search.
+    atol : float, optional
+        Tolerance with which to compare to zero.
+
+    Returns
+    -------
+    tuple[int] or None
+        If found, the first integer is which axis, and the second is which
+        column of that axis, else None.
+
+    Examples
+    --------
+
+        >>> x = np.array([[[0, 1], [0, 2]],
+        ...               [[0, 3], [0, 4]]])
+        >>> find_columns(x)
+        (2, 1)
+
+    Which means we can happily slice ``x`` without loss of information to:
+
+        >>> x[:, :, 1]
+        array([[1, 2],
+               [3, 4]])
+
+    """
+    shape = x.shape
+    indxrs = do('indices', shape, like=x)
+
+    for i in range(len(shape)):
+        for j in range(shape[i]):
+            if do('allclose', x[indxrs[i] != j], 0.0, atol=atol):
+                return (i, j)
+
+    return None
+
+
+class PArray:
+    """Simple array-like object that lazily generates the actual array by
+    calling a function with a set of parameters.
+
+    Parameters
+    ----------
+    fn : callable
+        The function that generates the tensor data from ``params``.
+    params : sequence of numbers
+        The initial parameters supplied to the generating function like
+        ``fn(params)``.
+
+    See Also
+    --------
+    PTensor
+    """
+
+    def __init__(self, fn, params, shape=None):
+        self._fn = fn
+        self._params = asarray(params)
+        self._shape = shape
+
+    @property
+    def fn(self):
+        return self._fn
+
+    @property
+    def params(self):
+        return self._params
+
+    @params.setter
+    def params(self, x):
+        self._params = asarray(x)
+
+    @property
+    def data(self):
+        self._data = self._fn(self._params)
+        return self._data
+
+    @property
+    def shape(self):
+        if self._shape is None:
+            self._shape = self.data.shape
+        return self._shape
+
+    @property
+    def ndim(self):
+        return len(self.shape)

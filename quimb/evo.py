@@ -9,10 +9,12 @@ import functools
 
 import numpy as np
 from scipy.integrate import complex_ode
+from scipy.sparse.linalg import LinearOperator
 
 from .core import (qarray, isop, ldmul, rdmul, explt,
                    dot, issparse, qu, eye, dag)
 from .linalg.base_linalg import eigh, norm, expm_multiply
+from .linalg.approx_spectral import norm_fro_approx
 from .utils import continuous_progbar, progbar
 
 
@@ -42,6 +44,26 @@ def schrodinger_eq_ket(ham):
     return psi_dot
 
 
+def schrodinger_eq_ket_timedep(ham):
+    """Wavefunction time dependent schrodinger equation.
+
+    Parameters
+    ----------
+    ham : callable
+        Time-dependant Hamiltonian governing evolution, such that ``ham(t)``
+        returns an operator representation of the Hamiltonian at time ``t``.
+
+    Returns
+    -------
+    psi_dot(t, y) : callable
+        Function to calculate psi_dot(t) at psi(t).
+    """
+    def psi_dot(t, y):
+        return -1.0j * dot(ham(t), y)
+
+    return psi_dot
+
+
 def schrodinger_eq_dop(ham):
     """Density operator schrodinger equation, but with flattened input/output.
 
@@ -64,6 +86,35 @@ def schrodinger_eq_dop(ham):
 
     def rho_dot(_, y):
         hrho = dot(ham, y.reshape(d, d))
+        return -1.0j * (hrho - hrho.T.conj()).reshape(-1)
+
+    return rho_dot
+
+
+def schrodinger_eq_dop_timedep(ham):
+    """Time dependent density operator schrodinger equation, but with flattened
+    input/output.
+
+    Note that this assumes both `ham(t)` and `rho` are hermitian in order to
+    speed up the commutator, non-hermitian hamiltonians as used to model loss
+    should be treated explicilty or with `schrodinger_eq_dop_vectorized`.
+
+    Parameters
+    ----------
+    ham : callable
+        Time-dependant Hamiltonian governing evolution, such that ``ham(t)``
+        returns an operator representation of the Hamiltonian at time ``t``.
+
+    Returns
+    -------
+    rho_dot(t, y) : callable
+        Function to calculate rho_dot(t) at rho(t), input and
+        output both in ravelled (1D form).
+    """
+    d = ham(0).shape[0]
+
+    def rho_dot(t, y):
+        hrho = dot(ham(t), y.reshape(d, d))
         return -1.0j * (hrho - hrho.T.conj()).reshape(-1)
 
     return rho_dot
@@ -170,18 +221,23 @@ def lindblad_eq_vectorized(ham, ls, gamma, sparse=False):
     return rho_dot
 
 
-def _calc_evo_eq(isdop, issparse, isopen=False):
+def _calc_evo_eq(isdop, issparse, isopen=False, timedep=False):
     """Choose an appropirate dynamical equation to evolve with.
     """
     eq_chooser = {
-        (0, 0, 0): schrodinger_eq_ket,
-        (0, 1, 0): schrodinger_eq_ket,
-        (1, 0, 0): schrodinger_eq_dop,
-        (1, 1, 0): schrodinger_eq_dop_vectorized,
-        (1, 0, 1): lindblad_eq,
-        (1, 1, 1): lindblad_eq_vectorized,
+        (0, 0, 0, 0): schrodinger_eq_ket,
+        (0, 1, 0, 0): schrodinger_eq_ket,
+        (1, 0, 0, 0): schrodinger_eq_dop,
+        (1, 1, 0, 0): schrodinger_eq_dop_vectorized,
+        (1, 0, 1, 0): lindblad_eq,
+        (1, 1, 1, 0): lindblad_eq_vectorized,
+        # time-dependent
+        (0, 0, 0, 1): schrodinger_eq_ket_timedep,
+        (0, 1, 0, 1): schrodinger_eq_ket_timedep,
+        (1, 0, 0, 1): schrodinger_eq_dop_timedep,
+        (1, 1, 0, 1): schrodinger_eq_dop_timedep,
     }
-    return eq_chooser[(isdop, issparse, isopen)]
+    return eq_chooser[(isdop, issparse, isopen, timedep)]
 
 
 # --------------------------------------------------------------------------- #
@@ -203,9 +259,11 @@ class Evolution(object):
     ----------
     p0 : quantum state
         Inital state, either vector or operator. If vector, converted to ket.
-    ham : operator, or tuple (1d array, operator).
+    ham : operator, tuple (1d array, operator), or callable
         Governing Hamiltonian, if tuple then assumed to contain
-        ``(eigvals, eigvecs)`` of presolved system.
+        ``(eigvals, eigvecs)`` of presolved system. If callable (but not a SciPy 
+        ``LinearOperator``), assume a time-dependent hamiltonian such that ``ham(t)`` 
+        is the Hamiltonian at time ``t``.
     t0 : float, optional
         Initial time (i.e. time of state ``p0``), defaults to zero.
     compute : callable, or dict of callable, optional
@@ -259,14 +317,29 @@ class Evolution(object):
         self._d = p0.shape[0]  # Hilbert space dimension
         self._progbar = progbar
 
+        self._timedep = callable(ham) and not isinstance(ham, LinearOperator)
+
         self._setup_callback(compute)
         self._method = method
 
         if method == 'solve' or isinstance(ham, (tuple, list)):
+            if isinstance(ham, LinearOperator):
+                raise TypeError("You can't use the 'solve' method "
+                                "with an abstract linear operator Hamiltonian.")
+            elif self._timedep:
+                raise TypeError("You can't use the 'solve' method "
+                                "with a time-dependent Hamiltonian.")
             self._solve_ham(ham)
+
         elif method == 'integrate':
             self._start_integrator(ham, int_small_step)
         elif method == 'expm':
+            if isinstance(ham, LinearOperator):
+                raise TypeError("You can't use the 'expm' method "
+                                "with an abstract linear operator Hamiltonian.")
+            elif self._timedep:
+                raise TypeError("You can't use the 'expm' method "
+                                "with a time-dependent Hamiltonian.")
             self._update_method = self._update_to_expm_ket
             self._pt = self._p0
             self.ham = ham
@@ -346,15 +419,25 @@ class Evolution(object):
     def _start_integrator(self, ham, small_step):
         """Initialize a stepping integrator.
         """
-        self._sparse_ham = issparse(ham)
+        if self._timedep:
+            H0 = ham(0.0)
+        else:
+            H0 = ham
 
         # set complex ode with governing equation
-        evo_eq = _calc_evo_eq(self._isdop, self._sparse_ham)
+        self._sparse_ham = issparse(H0)
+        evo_eq = _calc_evo_eq(self._isdop, self._sparse_ham, False, self._timedep)
+
         self._stepper = complex_ode(evo_eq(ham))
 
         # 5th order stpper or 8th order stepper
         int_mthd, step_fct = ('dopri5', 150) if small_step else ('dop853', 50)
-        first_step = norm(ham, 'f') / step_fct
+        if isinstance(H0, LinearOperator):
+            # approx norm doesn't need to be very accurate
+            nrm0 = norm_fro_approx(H0, tol=0.1)
+        else:
+            nrm0 = norm(H0, 'f')
+        first_step = nrm0 / step_fct
 
         self._stepper.set_integrator(int_mthd, nsteps=0, first_step=first_step)
 
