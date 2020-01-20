@@ -2183,7 +2183,7 @@ class TensorNetwork(object):
         else:
             for t in multiplied.tensors:
                 t.modify(data=t.data * x)
-            
+
 
         return multiplied
 
