@@ -174,7 +174,8 @@ class TNOptimizer:
         tol_change=1e-9,
         tol_grad=1e-6,
         device=None,
-        progbar=True
+        progbar=True,
+        BFGSopts=None
     ):
         torch, _ = _get_torch_and_device(device)
 
@@ -217,10 +218,12 @@ class TNOptimizer:
         )
 
         if optimizer == "LBFGS":
+            #self.optimizer = getattr(torch.optim, optimizer)(self.variables,
+            #                 lr=100.0, line_search_fn='strong_wolfe',
+            #                 tolerance_grad=tol_grad, tolerance_change=tol_change,
+            #                 max_iter=10, max_eval=60)
             self.optimizer = getattr(torch.optim, optimizer)(self.variables,
-                             lr=100.0, line_search_fn='strong_wolfe',
-                             tolerance_grad=tol_grad, tolerance_change=tol_change,
-                             max_iter=10, max_eval=60)
+                                     lr=learning_rate, **BFGSopts)
         else:
             self.optimizer = getattr(torch.optim, optimizer)(self.variables,
                                                          lr=learning_rate)
@@ -267,7 +270,8 @@ class TNOptimizer:
             return (time.time() - self._time_start) > max_time
 
     def _get_tn_opt_numpy(self):
-        tn_opt_numpy = self.tn_opt.apply_to_arrays(lambda x: x.cpu().detach().numpy())
+        tn_opt_numpy = self.norm_fn(self.tn_opt)
+        tn_opt_numpy.apply_to_arrays(lambda x: x.cpu().detach().numpy())
         return tn_opt_numpy
 
     def optimize(self, max_steps, max_time=None):
