@@ -4,6 +4,7 @@ automatically derive gradients for input to scipy.
 import re
 import functools
 import importlib
+import time
 
 import tqdm
 import numpy as np
@@ -14,7 +15,8 @@ from .array_ops import iscomplex
 from ..core import qarray
 
 if importlib.util.find_spec("jax") is not None:
-    _DEFAULT_BACKEND = 'jax'
+    #_DEFAULT_BACKEND = 'jax'
+    _DEFAULT_BACKEND = 'autograd'
 else:
     _DEFAULT_BACKEND = 'autograd'
 
@@ -300,8 +302,11 @@ class TNOptimizer:
             pbar = tqdm.tqdm(total=n, disable=not self.progbar)
 
             def callback(_):
-                pbar.update()
-                pbar.set_description(f"{self.loss}")
+                if self.progbar:
+                    pbar.update()
+                    pbar.set_description(f"{self.loss}")
+                else:
+                    print(f'energy: {self.loss}')
 
             self.res = minimize(
                 fun=self.vectorized_func,
@@ -334,9 +339,12 @@ class TNOptimizer:
 
             def inner_callback(xk):
                 self.loss_best = min(self.loss_best, self.loss)
-                pbar.update()
-                msg = f"{self.loss} [best: {self.loss_best}] "
-                pbar.set_description(msg)
+                if self.progbar:
+                    pbar.update()
+                    msg = f"{self.loss} [best: {self.loss_best}] "
+                    pbar.set_description(msg)
+                else:
+                    print(f'energy: {self.loss}, best: {self.loss_best}')
 
             self.res = basinhopping(
                 func=self.vectorized_func,
